@@ -407,9 +407,17 @@ export default class RTCEngine extends (EventEmitter as new () => TypedEventEmit
       this.client.sendIceCandidate(candidate, target);
     };
 
+    this.pcManager.onP2PIceCandidate = (candidate) => {
+      this.emit(EngineEvent.P2PIceCandidate, candidate)
+    }
+
     this.pcManager.onPublisherOffer = (offer) => {
       this.client.sendOffer(offer);
     };
+
+    this.pcManager.onP2POffer = (offer) => {
+      this.emit(EngineEvent.P2POffer, offer);
+    }
 
     this.pcManager.onDataChannel = this.handleDataChannel;
     this.pcManager.onStateChange = async (connectionState, publisherState, subscriberState) => {
@@ -769,7 +777,7 @@ export default class RTCEngine extends (EventEmitter as new () => TypedEventEmit
       track.codec = opts.videoCodec;
     }
 
-    const transceiverInit: RTCRtpTransceiverInit = { direction: 'sendonly', streams };
+    const transceiverInit: RTCRtpTransceiverInit = { /*direction: 'sendrecv',*/ streams };
     if (encodings) {
       transceiverInit.sendEncodings = encodings;
     }
@@ -1511,6 +1519,8 @@ export type EngineEventCallbacks = {
   offline: () => void;
   signalRequestResponse: (response: RequestResponse) => void;
   signalConnected: (joinResp: JoinResponse) => void;
+  p2pIceCandidate: (candidate: RTCIceCandidate) => void;
+  p2pOffer: (offer: RTCSessionDescriptionInit) => void;
 };
 
 function supportOptionalDatachannel(protocol: number | undefined): boolean {

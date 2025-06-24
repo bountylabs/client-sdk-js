@@ -57,7 +57,7 @@ import LocalTrack from '../track/LocalTrack';
 import LocalTrackPublication from '../track/LocalTrackPublication';
 import LocalVideoTrack, { videoLayersFromEncodings } from '../track/LocalVideoTrack';
 import { Track } from '../track/Track';
-import { createLocalTracks } from '../track/create';
+import { createLocalTracks, createLocalVideoTrack } from '../track/create';
 import type {
   AudioCaptureOptions,
   BackupVideoCodec,
@@ -111,6 +111,9 @@ import {
   computeVideoEncodings,
   getDefaultDegradationPreference,
 } from './publishUtils';
+import {TrackPublication} from "../track/TrackPublication";
+import kindToProto = Track.kindToProto;
+import sourceToProto = Track.sourceToProto;
 
 const STREAM_CHUNK_SIZE = 15_000;
 
@@ -259,9 +262,75 @@ export default class LocalParticipant extends Participant {
       .on(EngineEvent.SubscribedQualityUpdate, this.handleSubscribedQualityUpdate)
       .on(EngineEvent.Disconnected, this.handleDisconnected)
       .on(EngineEvent.SignalRequestResponse, this.handleSignalRequestResponse)
-      .on(EngineEvent.DataPacketReceived, this.handleDataPacket);
+      .on(EngineEvent.DataPacketReceived, this.handleDataPacket)
+      .on(EngineEvent.P2PIceCandidate, this.p2pIceCandidate)
+      .on(EngineEvent.P2POffer, this.p2pOffer);
 
     this.signalConnectedFuture = undefined;
+  }
+
+
+  async switchToP2P() {
+    console.log("P2P: switchin to p2p and re-enabling camera and mic")
+    this.engine.pcManager?.switchP2P();
+
+    this.engine.pcManager?.p2pConnection.printTransceivers("before publishing tracks")
+
+    const videoTrack = await createLocalVideoTrack()
+    await this.publishTrack(videoTrack)
+    console.log('P2P: published video track', videoTrack)
+
+    this.engine.pcManager?.p2pConnection.printTransceivers("after publishing tracks")
+
+    const pi = this.createParticipantUpdate()
+    const piJson = JSON.stringify(pi, (_, value) => {
+      return typeof value === 'bigint' ? `__bigint__${value.toString()}` : value
+    })
+    console.log("P2P: sending participant update", pi)
+    return this.publishData(
+        new TextEncoder().encode(JSON.stringify({
+          p2p: true,
+          type: 'participantUpdate', pu: piJson})),
+        {reliable: true }
+    );
+  }
+
+  private createParticipantUpdate(): ParticipantInfo {
+    const pi = structuredClone(this.participantInfo);
+    pi.tracks = Array.from(this.trackPublications.values()).map(this.createTrackInfoFromPub);
+    return pi;
+  }
+
+  private createTrackInfoFromPub(pub: TrackPublication): TrackInfo {
+    const track = pub.track
+    return {
+      sid: track?.sid ? track?.sid : "",
+      type: kindToProto(pub.kind),
+      name: pub.trackName,
+      muted: pub.isMuted,
+      source : sourceToProto(pub.source),
+      width: track?.kind === Track.Kind.Video ? (track as any).width : undefined,
+      height: track?.kind === Track.Kind.Video ? (track as any).height : undefined,
+      disableDtx: false,
+    }
+  }
+
+
+  private p2pOffer = async (offer: RTCSessionDescriptionInit) => {
+    await sleep(2000)
+    console.log("P2P: publishing offer")
+    return this.publishData(
+        new TextEncoder().encode(JSON.stringify({p2p: true, type: 'offer', sdp: offer})),
+        {reliable: true }
+    );
+  }
+
+  private p2pIceCandidate = async (candidate: RTCIceCandidate)=> {
+    await this.publishData(new TextEncoder().encode(JSON.stringify({
+      p2p: true,
+      type: 'ice-candidate',
+      candidate
+    })), {reliable: true});
   }
 
   private handleReconnecting = () => {

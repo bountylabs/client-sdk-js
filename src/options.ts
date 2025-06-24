@@ -92,6 +92,8 @@ export interface InternalRoomOptions {
    */
   e2ee?: E2EEOptions;
 
+  enableP2P?: boolean;
+
   loggerName?: string;
 }
 

@@ -45,6 +45,7 @@ export default class PCTransport extends EventEmitter {
   private config?: RTCConfiguration;
 
   private log = log;
+  private name: String;
 
   private loggerOptions: LoggerOptions;
 
@@ -78,8 +79,9 @@ export default class PCTransport extends EventEmitter {
 
   onTrack?: (ev: RTCTrackEvent) => void;
 
-  constructor(config?: RTCConfiguration, loggerOptions: LoggerOptions = {}) {
+  constructor(name: String, config?: RTCConfiguration, loggerOptions: LoggerOptions = {}) {
     super();
+    this.name = name;
     this.log = getLogger(loggerOptions.loggerName ?? LoggerNames.PCTransport);
     this.loggerOptions = loggerOptions;
     this.config = config;
@@ -87,31 +89,43 @@ export default class PCTransport extends EventEmitter {
   }
 
   private createPC() {
+    console.log(`createPC: ${JSON.stringify(this.config)}`)
     const pc = new RTCPeerConnection(this.config);
 
     pc.onicecandidate = (ev) => {
+      // console.log(`P2P: (${this.name}): onicecandidate`, ev.candidate?.candidate);
       if (!ev.candidate) return;
       this.onIceCandidate?.(ev.candidate);
     };
     pc.onicecandidateerror = (ev) => {
+      // console.log(`P2P: (${this.name}): onicecandidate error`, ev);
       this.onIceCandidateError?.(ev);
     };
 
     pc.oniceconnectionstatechange = () => {
+      // console.log(`P2P: (${this.name}): oniceconnectionstatechange`, pc.iceConnectionState);
       this.onIceConnectionStateChange?.(pc.iceConnectionState);
     };
 
+    pc.onnegotiationneeded = async () => {
+      console.log(`P2P: (${this.name}): onnegotiationneeded`);
+      // await this.createAndSendOffer()
+    }
+
     pc.onsignalingstatechange = () => {
+      // console.log(`P2P: (${this.name}): onsignalingstatechange`, pc.signalingState);
       this.onSignalingStatechange?.(pc.signalingState);
     };
 
     pc.onconnectionstatechange = () => {
+      // console.log(`P2P: (${this.name}): onconnectionstatechange`, pc.connectionState);
       this.onConnectionStateChange?.(pc.connectionState);
     };
     pc.ondatachannel = (ev) => {
       this.onDataChannel?.(ev);
     };
     pc.ontrack = (ev) => {
+      console.log(`P2P: (${this.name}): ontrack`, ev);
       this.onTrack?.(ev);
     };
     return pc;
@@ -131,11 +145,25 @@ export default class PCTransport extends EventEmitter {
   }
 
   async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+    // console.log(`P2P: (${this.name}): adding ice candidate: ${candidate.candidate}`)
     if (this.pc.remoteDescription && !this.restartingIce) {
       return this.pc.addIceCandidate(candidate);
     }
     this.pendingCandidates.push(candidate);
   }
+
+  printTransceivers(msg: string) {
+    const transceivers = this.pc.getTransceivers();
+    console.log(`P2P: (${this.name}): (${msg})  ${transceivers.length}:`);
+    transceivers.forEach((transceiver, index) => {
+      console.log(`P2P: Transceiver #${index}`);
+      console.log('P2P:  Direction:', transceiver.direction);
+      console.log('P2P:  Current Direction:', transceiver.currentDirection);
+      console.log('P2P:  Sender Track:', transceiver.sender.track);
+      console.log('P2P:  Receiver Track:', transceiver.receiver.track);
+    });
+  };
+
 
   async setRemoteDescription(sd: RTCSessionDescriptionInit): Promise<void> {
     let mungedSDP: string | undefined = undefined;
@@ -340,13 +368,23 @@ export default class PCTransport extends EventEmitter {
   }
 
   addTransceiver(mediaStreamTrack: MediaStreamTrack, transceiverInit: RTCRtpTransceiverInit) {
-    return this.pc.addTransceiver(mediaStreamTrack, transceiverInit);
+    console.log(`P2P: addTransceiver: ${JSON.stringify(transceiverInit)}`)
+    const transceiver = this.pc.getTransceivers().find(t => t.receiver.track.kind === 'video');
+
+    if (transceiver) {
+      const stream = new MediaStream([mediaStreamTrack]);
+      this.pc.addTrack(mediaStreamTrack, stream);
+      return transceiver;
+    } else {
+      return this.pc.addTransceiver(mediaStreamTrack, transceiverInit);
+    }
   }
 
   addTrack(track: MediaStreamTrack) {
     if (!this._pc) {
       throw new UnexpectedConnectionState('PC closed, cannot add track');
     }
+    console.log(`P2P: addTrack: ${JSON.stringify(track)}`)
     return this._pc.addTrack(track);
   }
 
@@ -467,8 +505,10 @@ export default class PCTransport extends EventEmitter {
           this.logContext,
         );
         if (remote) {
+          console.log(`P2P: (${this.name}): setting munged remote description`);
           await this.pc.setRemoteDescription(sd);
         } else {
+          console.log(`P2P: (${this.name}): setting munged local description`);
           await this.pc.setLocalDescription(sd);
         }
         return;
@@ -484,8 +524,10 @@ export default class PCTransport extends EventEmitter {
 
     try {
       if (remote) {
+        console.log(`P2P: (${this.name}): setting remote description`);
         await this.pc.setRemoteDescription(sd);
       } else {
+        console.log(`P2P: (${this.name}): setting local description`);
         await this.pc.setLocalDescription(sd);
       }
     } catch (e) {

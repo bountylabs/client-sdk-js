@@ -210,7 +210,7 @@ export default class RemoteParticipant extends Participant {
           adaptiveStreamSettings,
           triesLeft! - 1,
         );
-      }, 150);
+      }, 500);
       return;
     }
 

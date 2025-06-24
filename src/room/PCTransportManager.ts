@@ -22,6 +22,10 @@ export class PCTransportManager {
 
   public subscriber: PCTransport;
 
+  public p2pConnection: PCTransport;
+
+  isP2P: boolean;
+
   public peerConnectionTimeout: number = roomConnectOptionDefaults.peerConnectionTimeout;
 
   public get needsPublisher() {
@@ -44,11 +48,16 @@ export class PCTransportManager {
 
   public onIceCandidate?: (ev: RTCIceCandidate, target: SignalTarget) => void;
 
+  // TODO merge with onIceCandidate with Signal Target
+  public onP2PIceCandidate?: (ev: RTCIceCandidate) => void;
+
   public onDataChannel?: (ev: RTCDataChannelEvent) => void;
 
   public onTrack?: (ev: RTCTrackEvent) => void;
 
   public onPublisherOffer?: (offer: RTCSessionDescriptionInit) => void;
+
+  public onP2POffer?: (offer: RTCSessionDescriptionInit) => void;
 
   private isPublisherConnectionRequired: boolean;
 
@@ -63,6 +72,7 @@ export class PCTransportManager {
   private log = log;
 
   private loggerOptions: LoggerOptions;
+  private rtcConfig : RTCConfiguration;
 
   constructor(
     rtcConfig: RTCConfiguration,
@@ -72,11 +82,35 @@ export class PCTransportManager {
     this.log = getLogger(loggerOptions.loggerName ?? LoggerNames.PCManager);
     this.loggerOptions = loggerOptions;
 
+    this.rtcConfig = rtcConfig;
+
+    this.isP2P = false;
+    this.p2pConnection = new PCTransport("p2p", this.rtcConfig, this.loggerOptions);
+    this.p2pConnection.onIceCandidate = (candidate) => {
+      // console.log(`P2P: received ice candidate: ${candidate.candidate}`)
+      this.onP2PIceCandidate?.(candidate);
+    };
+
+    this.p2pConnection.onTrack = (ev) => {
+      if (this.isP2P) {
+        this.onTrack?.(ev);
+      } else {
+        console.log("P2P: received track on p2p connection but not in p2p mode. Ignoring.")
+      }
+    }
+
+    this.p2pConnection.onOffer = (offer) => {
+      this.onP2POffer?.(offer);
+    }
+
+
+
     this.isPublisherConnectionRequired = !subscriberPrimary;
     this.isSubscriberConnectionRequired = subscriberPrimary;
-    this.publisher = new PCTransport(rtcConfig, loggerOptions);
-    this.subscriber = new PCTransport(rtcConfig, loggerOptions);
+    this.publisher = new PCTransport("publisher", rtcConfig, loggerOptions);
+    this.subscriber = new PCTransport("subscriber", rtcConfig, loggerOptions);
 
+    // TODO subscribe for p2p
     this.publisher.onConnectionStateChange = this.updateState;
     this.subscriber.onConnectionStateChange = this.updateState;
     this.publisher.onIceConnectionStateChange = this.updateState;
@@ -94,7 +128,11 @@ export class PCTransportManager {
       this.onDataChannel?.(ev);
     };
     this.subscriber.onTrack = (ev) => {
-      this.onTrack?.(ev);
+      if (!this.isP2P) {
+        this.onTrack?.(ev);
+      } else {
+        console.log("P2P: received track on subscriber connection but in p2p mode. Ignoring.")
+      }
     };
     this.publisher.onOffer = (offer) => {
       this.onPublisherOffer?.(offer);
@@ -124,6 +162,15 @@ export class PCTransportManager {
 
   createAndSendPublisherOffer(options?: RTCOfferOptions) {
     return this.publisher.createAndSendOffer(options);
+  }
+
+  createAndSendP2POffer(options?: RTCOfferOptions) {
+    return this.p2pConnection.createAndSendOffer(options);
+  }
+
+  setP2PAnswer(sd: RTCSessionDescriptionInit) {
+    console.log("P2P: received P2P answer")
+    return this.p2pConnection.setRemoteDescription(sd);
   }
 
   setPublisherAnswer(sd: RTCSessionDescriptionInit) {
@@ -168,6 +215,10 @@ export class PCTransportManager {
     }
   }
 
+  async addP2PIceCandidate(candidate: RTCIceCandidateInit) {
+    await this.p2pConnection.addIceCandidate(candidate);
+  }
+
   async createSubscriberAnswerFromOffer(sd: RTCSessionDescriptionInit) {
     this.log.debug('received server offer', {
       ...this.logContext,
@@ -186,6 +237,22 @@ export class PCTransportManager {
       unlock();
     }
   }
+
+  async createP2PAnswerFromOffer(sd: RTCSessionDescriptionInit, callback: () => Promise<void>) {
+    console.log(`P2P: received P2P offer: ${sd.sdp}`)
+    const unlock = await this.remoteOfferLock.lock();
+    try {
+      await this.p2pConnection.setRemoteDescription(sd);
+      await callback()
+
+      // answer the offer
+      const answer = await this.p2pConnection.createAndSetAnswer();
+      return answer;
+    } finally {
+      unlock();
+    }
+  }
+
 
   updateConfiguration(config: RTCConfiguration, iceRestart?: boolean) {
     this.publisher.setConfiguration(config);
@@ -246,11 +313,23 @@ export class PCTransportManager {
   }
 
   addPublisherTransceiver(track: MediaStreamTrack, transceiverInit: RTCRtpTransceiverInit) {
-    return this.publisher.addTransceiver(track, transceiverInit);
+    if (this.isP2P) {
+      console.log("P2P: adding transceiver to p2p connection")
+      return this.p2pConnection.addTransceiver(track, transceiverInit);
+    } else {
+      console.log("P2P: adding transceiver to publisher connection")
+      return this.publisher.addTransceiver(track, transceiverInit);
+    }
   }
 
   addPublisherTrack(track: MediaStreamTrack) {
-    return this.publisher.addTrack(track);
+    if (this.isP2P) {
+      console.log("P2P: adding track to p2p connection")
+      return this.p2pConnection.addTrack(track);
+    } else {
+      console.log("P2P: adding track to publisher connection")
+      return this.publisher.addTrack(track);
+    }
   }
 
   createPublisherDataChannel(label: string, dataChannelDict: RTCDataChannelInit) {
@@ -366,5 +445,14 @@ export class PCTransportManager {
       abortController?.signal.removeEventListener('abort', abortHandler);
       resolve();
     });
+  }
+
+  switchP2P() {
+    this.isP2P = true;
+  }
+
+  switchSFU() {
+    this.isP2P = false;
+    this.p2pConnection.close();
   }
 }
