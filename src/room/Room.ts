@@ -285,7 +285,97 @@ class Room extends (EventEmitter as new () => TypedEmitter<RoomEventCallbacks>) 
         });
       }
     }
+    this.setupP2P();
   }
+
+  private setupP2P() {
+    if (!this.options.enableP2P) return;
+
+    this.on(RoomEvent.ParticipantConnected, this.handleParticipantChange.bind(this));
+    this.on(RoomEvent.ParticipantDisconnected, this.handleParticipantChange.bind(this));
+
+    this.on(RoomEvent.Connected, async () => {
+      console.log(`P2P: room connected, participants: ${this.remoteParticipants.size}`)
+      if (this.remoteParticipants.size >= 2) {
+        this.switchToSFU();
+      }
+    })
+
+    this.on(RoomEvent.DataReceived, async ( payload, participant) => {
+      const data = JSON.parse(new TextDecoder().decode(payload));
+      console.log(`P2P: Received P2P signaling from ${participant?.identity}: ${data.type}, this.options.enableP2P: ${this.options.enableP2P}`);
+      if (!data.p2p) return;
+
+      if (!participant) {
+        console.log("P2P: Received P2P signaling from unknown participant. Ignoring.")
+        return ;
+      }
+
+      if (data.type === 'offer') {
+        this.engine.pcManager?.switchP2P();
+        this.engine.pcManager?.p2pConnection.printTransceivers("before generating answer")
+        await this.handleP2POffer(data.sdp, participant.identity);
+        this.engine.pcManager?.p2pConnection.printTransceivers("after generating answer")
+      } else if (data.type === 'answer') {
+        console.log(`P2P: Received P2P answer from ${participant?.identity}.`);
+        await this.engine.pcManager?.setP2PAnswer(data.sdp);
+      } else if (data.type === 'ice-candidate') {
+        await this.engine.pcManager?.addP2PIceCandidate(data.candidate);
+      } else if (data.type === 'participantUpdate') {
+        console.log("P2P: received participant update")
+        const pu = JSON.parse(data.pu, (_, value) => {
+          if (typeof value === 'string' && value.startsWith('__bigint__')) {
+            return BigInt(value.slice(10));
+          }
+          return value;
+        })
+        this.engine.emit(EngineEvent.ParticipantUpdate, [pu])
+      } else {
+        console.log(`P2P: Received unknown P2P signaling from ${participant?.identity}. Ignoring.`)
+      }
+    });
+
+    console.log("P2P: initialized p2p callbacks")
+  }
+
+  private async handleP2POffer(sdp: RTCSessionDescriptionInit, participantIdentity: string) {
+    console.log(`P2P: handleP2POffer: participantIdentity: ${participantIdentity}`)
+    const answer = await this.engine.pcManager.createP2PAnswerFromOffer(sdp, this.switchToP2P.bind(this))
+    console.log(`P2P: send answer`)
+    return this.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({ p2p: true, type: 'answer', sdp: answer })), {reliable: true, destinationIdentities: [participantIdentity]});
+  }
+
+
+  private async handleParticipantChange() {
+    const participantCount = this.remoteParticipants.size + 1;
+    console.log(`P2P: handleParticipantChange: participant count: ${participantCount},  this.options.enableP2P: ${this.options.enableP2P}`);
+    if (participantCount === 2 && this.options.enableP2P) {
+      await this.switchToP2P();
+      await this.sendP2POffer();
+    } else if (participantCount > 2) {
+      await this.switchToSFU();
+    }
+  }
+
+  private async switchToSFU() {
+    console.log("P2P: switching to SFU")
+    this.engine.pcManager?.switchSFU();
+    return this.localParticipant.enableCameraAndMicrophone()
+  }
+
+  private async switchToP2P() {
+    console.log('P2P: Switching to P2P mode');
+    return this.localParticipant.switchToP2P();
+  }
+
+  private async sendP2POffer() {
+    // TODO fix
+    if (!this.engine.pcManager) {
+      console.log("P2P: sendP2POffer: engine.pcManager is null");
+    }
+    return this.engine.pcManager?.createAndSendP2POffer()
+  }
+
 
   registerTextStreamHandler(topic: string, callback: TextStreamHandler) {
     if (this.textStreamHandlers.has(topic)) {
@@ -1458,9 +1548,15 @@ class Room extends (EventEmitter as new () => TypedEmitter<RoomEventCallbacks>) 
       return;
     }
 
-    const participant = Array.from(this.remoteParticipants.values()).find(
+    let participant = Array.from(this.remoteParticipants.values()).find(
       (p) => p.sid === participantSid,
     ) as RemoteParticipant | undefined;
+
+    // TODO hack
+    if (!participant) {
+      console.log('P2P: hack: replicing participant')
+      participant = this.remoteParticipants.values().next().value as RemoteParticipant | undefined ;
+    }
 
     if (!participant) {
       this.log.error(
@@ -1631,10 +1727,13 @@ class Room extends (EventEmitter as new () => TypedEmitter<RoomEventCallbacks>) 
         // create participant if doesn't exist
         remoteParticipant = this.getOrCreateParticipant(info.identity, info);
       }
+
+      console.log(`Remote participant has changed: ${info.identity}`);
     });
   };
 
   private handleParticipantDisconnected(identity: string, participant?: RemoteParticipant) {
+    console.log(`Participant ${identity} has disconnected`);
     // remove and send event
     this.remoteParticipants.delete(identity);
     if (!participant) {

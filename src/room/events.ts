@@ -586,6 +586,8 @@ export enum EngineEvent {
   SignalRequestResponse = 'signalRequestResponse',
   SignalConnected = 'signalConnected',
   RoomMoved = 'roomMoved',
+  P2PIceCandidate = 'p2pIceCandidate',
+  P2POffer = 'p2pOffer',
 }
 
 export enum TrackEvent {

@@ -113,7 +113,7 @@ const appActions = {
         deviceId: audioOutputId,
       },
       publishDefaults: {
-        simulcast,
+        simulcast: false,
         videoSimulcastLayers: [VideoPresets.h90, VideoPresets.h216],
         videoCodec: preferredCodec || 'vp8',
         dtx: true,
@@ -129,6 +129,7 @@ const appActions = {
       e2ee: e2eeEnabled
         ? { keyProvider: state.e2eeKeyProvider, worker: new E2EEWorker() }
         : undefined,
+      enableP2P: true,
     };
     if (
       roomOpts.publishDefaults?.videoCodec === 'av1' ||
@@ -356,7 +357,6 @@ const appActions = {
       const publishPromise = new Promise<void>(async (resolve, reject) => {
         try {
           if (shouldPublish) {
-            await room.localParticipant.enableCameraAndMicrophone();
             appendLog(`tracks published in ${Date.now() - startTime}ms`);
             updateButtonsForPublishState();
           }
@@ -709,6 +709,7 @@ function appendLog(...args: any[]) {
 
 // updates participant UI
 function renderParticipant(participant: Participant, remove: boolean = false) {
+  appendLog('renderParticipant', participant.identity, remove);
   const container = getParticipantsAreaElement();
   if (!container) return;
   const { identity } = participant;
